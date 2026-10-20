@@ -172,7 +172,7 @@ def main():
 
     # ---------------- 经济价值
     st.subheader('4. 该联系多少人')
-    st.caption('命中率随名单变长而下降，联系也有成本。填两个数，系统自动算最优名单长度。')
+    st.caption('系统不替你定。这里给两条曲线和一个滑块，名单长度你自己拖。')
     e1, e2 = st.columns(2)
     with e1:
         cost = st.number_input('联系一个客户的成本（元）', 1.0, 10000.0, 50.0, step=10.0)
@@ -180,22 +180,45 @@ def main():
         value = st.number_input('一次复购带来的毛利（元）', 1.0, 100000.0, 200.0, step=50.0)
 
     prof, best = af.profit_table(out, ana['ref_y'], ana['ref_s'], cost, value)
-
     if prof is None:
         st.warning('回测窗口不足，算不出实测命中曲线，这块先跳过。')
-    else:
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric('建议联系人数', '%d 人' % int(best['N']))
-        m2.metric('预计命中', '%.0f 人' % best['预计命中'])
-        m3.metric('预计命中率', '%.1f%%' % (100 * best['预计命中率']))
-        m4.metric('预计净收益', '%.0f 元' % best['净收益'])
-        st.caption('命中率来自实测：用最后一个回测窗口上真实发生的结果，'
-                   '按名单长度的相对分位迁移到本次名单。不是拍的。')
-        if best['净收益'] <= 0:
-            st.warning('按这组成本算，投出去是亏的：联系成本高于预期收益。'
-                       '要么降低触达成本，要么提高复购价值。')
-        with st.expander('看完整的经济曲线'):
-            st.dataframe(prof.round(4), use_container_width=True)
+        return
+
+    pool_n = int(prof['N'].max())
+    st.info('参考：净收益最高点在 N = %d（命中率 %.1f%%，净收益 %.0f 元）。'
+            '这只是最高点，不是唯一答案 —— 想留更多客户就往上拖，想省钱就往下拖。'
+            % (best['N'], 100 * best['预计命中率'], best['净收益']))
+
+    n_pick = st.slider('你决定联系多少人', 10, pool_n, int(best['N'] // 10 * 10) or 10, step=10,
+                       help='名单越长，命中率越低，但能覆盖更多会回头的人')
+    row = prof.iloc[(prof['N'] - n_pick).abs().argmin()]
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric('联系人数', '%d 人' % int(row['N']))
+    m2.metric('预计命中', '%.0f 人' % row['预计命中'])
+    m3.metric('预计命中率', '%.1f%%' % (100 * row['预计命中率']),
+              delta='比随机高 %.1f 个点' % (100 * (row['预计命中率'] - ytr.mean())))
+    m4.metric('净收益', '%.0f 元' % row['净收益'])
+
+    st.write('净收益随名单长度的变化')
+    chart = prof.set_index('N')['净收益'].rename('净收益（元）')
+    st.line_chart(chart, height=260)
+
+    with st.expander('成本不确定？看这张：不同成本下名单会变成什么样'):
+        rows = []
+        for c in [5, 20, 50, 100, 200]:
+            _, b = af.profit_table(out, ana['ref_y'], ana['ref_s'], c, value)
+            if b is None:
+                continue
+            rows.append({'联系成本': c, '门槛 C/V': round(c / value, 3),
+                         '最优 N': int(b['N']), '命中率': round(float(b['预计命中率']), 4),
+                         '净收益': round(float(b['净收益']), 0)})
+        st.dataframe(pd.DataFrame(rows), use_container_width=True)
+        st.caption('门槛 C/V 的意思是：命中率低于这个数，多联系一个人就亏钱。'
+                   '成本越低名单越长，成本高到 150 以上时，只剩打分最高的那几十个人值得打。')
+
+    with st.expander('看完整的经济明细表'):
+        st.dataframe(prof.round(4), use_container_width=True)
 
     topn = st.slider('查看前几名', 10, min(2000, len(out)), min(200, len(out)), step=10)
     st.dataframe(out.head(topn).round(4), use_container_width=True)

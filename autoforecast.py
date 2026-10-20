@@ -30,9 +30,12 @@ BAD_CUST = r'(stock|sku|code|product|item|商品|编码)'
 
 def _to_dt(s: pd.Series) -> pd.Series:
     """先走快速路径（规整格式），失败率高才用 mixed 逐行推断。"""
-    out = pd.to_datetime(s, errors='coerce')
-    if out.isna().mean() > 0.2:
-        out = pd.to_datetime(s, errors='coerce', format='mixed')
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')          # 逐行推断的 UserWarning 刷屏，吞掉
+        out = pd.to_datetime(s, errors='coerce')
+        if out.isna().mean() > 0.2:
+            out = pd.to_datetime(s, errors='coerce', format='mixed')
     return out
 
 
