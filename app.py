@@ -27,19 +27,46 @@ def read_upload(name: str, data: bytes) -> pd.DataFrame:
     return pd.read_csv(buf, low_memory=False)
 
 
+def compute(raw, roles, horizon):
+    """跑完整流程。结果存进 session_state —— 按钮只在点击的那一次返回 True。"""
+    X = af.prepare(raw, roles)
+    res, summary, cuts = af.backtest(X, verbose=False)
+    if res.empty:
+        return {'error': '历史数据太短，切不出回测窗口（至少需要 %d 天以上）。' % (horizon * 3)}
+    champion = summary.index[0]
+    out, model, Xtr, ytr = af.forecast(X, champion, af.make_models()[champion], horizon=horizon)
+    ref_y, ref_s = af.last_window_detail(X, champion, cuts)
+    return dict(X=X, res=res, summary=summary, cuts=cuts, out=out, ytr=ytr,
+                champion=champion, ref_y=ref_y, ref_s=ref_s)
+
+
 def main():
     st.title('复购预测 · 自动建模')
     st.caption('上传一份订单明细表，系统自动切时间窗口、自动挑模型、输出该联系的客户名单。'
                '不需要懂机器学习。')
 
+    ss = st.session_state
+    ss.setdefault('ana', None)
+    ss.setdefault('use_demo', False)
+
     up = st.file_uploader('上传订单表（Excel 或 CSV）', type=['xlsx', 'xls', 'xlsm', 'csv'])
+    demo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'demo_sample.csv')
     if up is None:
         st.info('需要的列：客户编号、下单日期、金额（或 数量×单价）。其它列可有可无。')
-        return
-
-    with st.spinner('正在读取文件…'):
-        raw = read_upload(up.name, up.getvalue())
-    st.success('读取成功：%d 行 × %d 列' % raw.shape)
+        if not os.path.exists(demo_path):
+            return
+        if st.button('没有数据？用内置示例跑一遍（600 个真实客户，8 万行）'):
+            ss.use_demo = True
+        if not ss.use_demo:
+            return
+        raw = pd.read_csv(demo_path, low_memory=False)
+        st.success('示例数据：%d 行 × %d 列' % raw.shape)
+        src = 'demo'
+    else:
+        with st.spinner('正在读取文件…'):
+            raw = read_upload(up.name, up.getvalue())
+        st.success('读取成功：%d 行 × %d 列' % raw.shape)
+        src = up.name
     with st.expander('看一眼前 5 行'):
         st.dataframe(raw.head(), use_container_width=True)
 
@@ -97,21 +124,28 @@ def main():
         roles['quantity'], roles['price'] = qty_col, prc_col
         roles['amount_mode'] = 'qty_x_price'
 
-    if not st.button('开始分析', type='primary'):
+    sig = '|'.join([src, date_col, cust_col, inv_col, amt_col, qty_col, prc_col, str(horizon)])
+    ss.setdefault('sig', None)
+    if st.button('开始分析', type='primary'):
+        with st.spinner('自动切窗口、给每个模型打分、训练、预测…'):
+            ss.ana = compute(raw, roles, horizon)
+        ss.sig = sig
+
+    if ss.ana is None or ss.sig != sig:
+        return
+    ana = ss.ana
+    if ana.get('error'):
+        st.error(ana['error'])
         return
 
-    t0 = time.time()
-    X = af.prepare(raw, roles)
+    X, res, summary, cuts = ana['X'], ana['res'], ana['summary'], ana['cuts']
+    out, ytr, champion = ana['out'], ana['ytr'], ana['champion']
+
     st.write('清洗后 %d 行，%d 个客户，时间范围 %s ~ %s'
              % (len(X), X['cust'].nunique(), X['dt'].min().date(), X['dt'].max().date()))
 
     # ---------------- 回测
     st.subheader('2. 自动切窗口 + 滚动回测')
-    with st.spinner('正在用多个时间窗口给每个模型打分…'):
-        res, summary, cuts = af.backtest(X, verbose=False)
-    if res.empty:
-        st.error('历史数据太短，切不出可用于回测的窗口（至少需要 %d 天以上）。' % (horizon * 3))
-        return
 
     left, right = st.columns([3, 2])
     with left:
@@ -128,9 +162,6 @@ def main():
 
     # ---------------- 预测
     st.subheader('3. 生成名单')
-    with st.spinner('用冠军模型训练并预测…'):
-        out, model, Xtr, ytr = af.forecast(X, champion, af.make_models()[champion], horizon=horizon)
-
     n_new = int(out['is_new'].sum())
     st.write('训练用 %d 人（其中会复购的 %d 人，占 %.1f%%）｜本次预测覆盖 %d 人'
              % (len(ytr), ytr.sum(), 100 * ytr.mean(), len(out)))
@@ -148,8 +179,7 @@ def main():
     with e2:
         value = st.number_input('一次复购带来的毛利（元）', 1.0, 100000.0, 200.0, step=50.0)
 
-    ref_y, ref_s = af.last_window_detail(X, champion, cuts)
-    prof, best = af.profit_table(out, ref_y, ref_s, cost, value)
+    prof, best = af.profit_table(out, ana['ref_y'], ana['ref_s'], cost, value)
 
     if prof is None:
         st.warning('回测窗口不足，算不出实测命中曲线，这块先跳过。')
@@ -176,7 +206,6 @@ def main():
     st.download_button('下载模型成绩（CSV）',
                        summary.to_csv().encode('utf-8-sig'),
                        file_name='模型成绩.csv', mime='text/csv')
-    st.caption('总耗时 %.1f 秒' % (time.time() - t0))
 
 
 if __name__ == '__main__':

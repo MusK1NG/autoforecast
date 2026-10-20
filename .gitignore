@@ -1,6 +1,7 @@
 # 数据文件不进仓库（原始 45MB / 转换后 96MB，用 fetch_data.py 现下）
 data/*
 !data/.gitkeep
+!data/demo_sample.csv
 
 output/*
 !output/.gitkeep
