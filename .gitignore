@@ -1,0 +1,12 @@
+# 数据文件不进仓库（原始 45MB / 转换后 96MB，用 fetch_data.py 现下）
+data/*
+!data/.gitkeep
+
+output/*
+!output/.gitkeep
+
+__pycache__/
+*.pyc
+.cache_*
+.ipynb_checkpoints/
+.DS_Store
