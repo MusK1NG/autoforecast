@@ -172,7 +172,7 @@ def main():
 
     # ---------------- 经济价值
     st.subheader('4. 该联系多少人')
-    st.caption('系统不替你定。这里给两条曲线和一个滑块，名单长度你自己拖。')
+    st.caption('系统不替你定。先选你这次的目的，系统给出一个参考长度；滑块仍然可以自己拖，拖到哪数字跟着变。')
     e1, e2 = st.columns(2)
     with e1:
         cost = st.number_input('联系一个客户的成本（元）', 1.0, 10000.0, 50.0, step=10.0)
@@ -180,29 +180,90 @@ def main():
         value = st.number_input('一次复购带来的毛利（元）', 1.0, 100000.0, 200.0, step=50.0)
 
     prof, best = af.profit_table(out, ana['ref_y'], ana['ref_s'], cost, value)
-    if prof is None:
+    if prof is None or best is None:
         st.warning('回测窗口不足，算不出实测命中曲线，这块先跳过。')
         return
 
     pool_n = int(prof['N'].max())
-    st.info('参考：净收益最高点在 N = %d（命中率 %.1f%%，净收益 %.0f 元）。'
-            '这只是最高点，不是唯一答案 —— 想留更多客户就往上拖，想省钱就往下拖。'
-            % (best['N'], 100 * best['预计命中率'], best['净收益']))
+    total_hits = float(prof['预计命中'].iloc[-1])
 
-    n_pick = st.slider('你决定联系多少人', 10, pool_n, int(best['N'] // 10 * 10) or 10, step=10,
-                       help='名单越长，命中率越低，但能覆盖更多会回头的人')
-    row = prof.iloc[(prof['N'] - n_pick).abs().argmin()]
+    def at(n):
+        """取表里最接近 n 的那一行。"""
+        return prof.iloc[(prof['N'] - int(n)).abs().argmin()]
 
-    m1, m2, m3, m4 = st.columns(4)
+    def pack(r):
+        return {'联系人数': int(r['N']),
+                '预计命中': round(float(r['预计命中']), 1),
+                '命中率': round(float(r['预计命中率']), 4),
+                '覆盖会复购客户': round(100.0 * float(r['预计命中']) / total_hits, 1),
+                '净收益': round(float(r['净收益']), 0)}
+
+    goal = st.radio('你这次的目的', ['净收益最大', '控制预算', '覆盖一定比例的会复购客户'],
+                    horizontal=True, key='goal')
+    cover = 80
+    budget = min(10000.0, cost * pool_n)
+
+    if goal == '控制预算':
+        budget = st.number_input('这次最多愿意花在触达上的钱（元）',
+                                 float(cost * 10), float(cost * pool_n),
+                                 float(min(10000.0, cost * pool_n)), step=500.0)
+        inside = prof[prof['成本'] <= budget]
+        ref_n = int(inside['N'].max()) if len(inside) else int(prof['N'].min())
+        r = at(ref_n)
+        st.info('预算 %.0f 元 → 最多联系 %d 人（花 %.0f 元），预计命中 %.0f 人、命中率 %.1f%%、净收益 %.0f 元。'
+                % (budget, ref_n, r['成本'], r['预计命中'], 100 * r['预计命中率'], r['净收益']))
+    elif goal == '覆盖一定比例的会复购客户':
+        cover = st.slider('想覆盖百分之多少「会复购」的客户', 5, 100, 80, step=5)
+        need = total_hits * cover / 100.0
+        ok = prof[prof['预计命中'] >= need]
+        ref_n = int(ok['N'].min()) if len(ok) else pool_n
+        r = at(ref_n)
+        st.info('要覆盖 %d%% 的会复购客户（约 %.0f 人），需要联系 %d 人（占客户池 %.0f%%），'
+                '这批人的命中率 %.1f%%。'
+                % (cover, need, ref_n, 100.0 * ref_n / pool_n, 100 * r['预计命中率']))
+    else:
+        ref_n = int(best['N'])
+        r = at(ref_n)
+        st.info('参考：净收益最高点在 N = %d（命中率 %.1f%%，净收益 %.0f 元）。'
+                '这只是最高点，不是唯一答案 —— 想留更多客户就往上拖，想省钱就往下拖。'
+                % (ref_n, 100 * r['预计命中率'], r['净收益']))
+
+    lo = 10 if pool_n >= 10 else 1
+    default_n = int(min(max(lo, ref_n), pool_n))
+    n_pick = st.slider('你决定联系多少人', lo, pool_n, default_n, step=1,
+                       help='名单越长，命中率越低，但能覆盖更多会回头的人',
+                       key='n_pick_%d' % ref_n)
+    row = at(n_pick)
+
+    m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric('联系人数', '%d 人' % int(row['N']))
     m2.metric('预计命中', '%.0f 人' % row['预计命中'])
     m3.metric('预计命中率', '%.1f%%' % (100 * row['预计命中率']),
               delta='比随机高 %.1f 个点' % (100 * (row['预计命中率'] - ytr.mean())))
-    m4.metric('净收益', '%.0f 元' % row['净收益'])
+    m4.metric('覆盖会复购客户', '%.1f%%' % (100 * row['预计命中'] / total_hits))
+    m5.metric('净收益', '%.0f 元' % row['净收益'])
+
+    if row['净收益'] < 0:
+        st.warning('按这个目的和成本，这个名单长度是亏钱的（净收益 %.0f 元）：命中率 %.1f%% 低于门槛 C/V = %.2f。'
+                   '要么把名单缩短，要么把单次触达成本压下来。'
+                   % (row['净收益'], 100 * row['预计命中率'], cost / value))
 
     st.write('净收益随名单长度的变化')
     chart = prof.set_index('N')['净收益'].rename('净收益（元）')
     st.line_chart(chart, height=260)
+
+    with st.expander('三种目的放一起看：各自要联系多少人'):
+        need = total_hits * cover / 100.0
+        ok = prof[prof['预计命中'] >= need]
+        c_row = at(int(ok['N'].min())) if len(ok) else at(pool_n)
+        ins = prof[prof['成本'] <= budget]
+        b_row = at(int(ins['N'].max())) if len(ins) else at(prof['N'].min())
+        comp = [dict(目的='净收益最大', **pack(at(best['N']))),
+                dict(目的='预算 %.0f 元' % budget, **pack(b_row)),
+                dict(目的='覆盖 %d%% 会复购' % cover, **pack(c_row))]
+        st.dataframe(pd.DataFrame(comp), use_container_width=True, hide_index=True)
+        st.caption('三行是同一份预测分数、同一套 C/V，只是「目的」不同。'
+                   '要更长的名单就得多花钱，要省预算就得接受漏掉一部分会回头的人。')
 
     with st.expander('成本不确定？看这张：不同成本下名单会变成什么样'):
         rows = []
